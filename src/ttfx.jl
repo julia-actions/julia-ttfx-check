@@ -74,7 +74,7 @@ function config()
     # A workload is the path of a file relative to the repository root, or inline code.
     function workload_file(w, name)
         isempty(w) && return ""
-        f = joinpath(repo_dir, w)
+        f = normpath(joinpath(repo_dir, w))
         isfile(f) && return f
         occursin(r"^[^\n]*\.jl$", w) && error("workload file `$w` not found in $repo_dir")
         mkpath(work)
