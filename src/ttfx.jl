@@ -39,14 +39,14 @@ depot(a::Arm) = joinpath(a.root, "depot")
 
 # A task is a package to load, and optionally a workload to run after loading it: the
 # package under test, or one of its dependents.
-struct Task
+struct PkgTask
     pkg::String
     workload::String    # path of the workload script, or "" for none
     dependent::Bool
 end
-project(a::Arm, t::Task) = joinpath(a.root, "env-" * t.pkg)
-script(a::Arm, t::Task) = joinpath(a.root, "task-" * t.pkg * ".jl")
-metrics_of(cfg, t::Task) = filter(m -> m.key != "run" || !isempty(t.workload), cfg.metrics)
+project(a::Arm, t::PkgTask) = joinpath(a.root, "env-" * t.pkg)
+script(a::Arm, t::PkgTask) = joinpath(a.root, "task-" * t.pkg * ".jl")
+metrics_of(cfg, t::PkgTask) = filter(m -> m.key != "run" || !isempty(t.workload), cfg.metrics)
 
 struct Config
     julia::Cmd
@@ -56,7 +56,7 @@ struct Config
     name::String           # keys the comment marker
     pkg::String
     exts::Vector{String}
-    tasks::Vector{Task}
+    tasks::Vector{PkgTask}
     blocks::Int
     repeats::Int
     timeout::Float64
@@ -67,26 +67,27 @@ end
 function config()
     work = abspath(env("TTFX_WORK", joinpath(tempdir(), "julia-ttfx")))
     head_dir = abspath(env("TTFX_HEAD_DIR", pwd()))
+    repo_dir = abspath(env("TTFX_REPO_DIR", head_dir))
     proj = TOML.parsefile(joinpath(head_dir, "Project.toml"))
     haskey(proj, "name") || error("$(joinpath(head_dir, "Project.toml")) has no package name")
     pkg = proj["name"]
     exts = collect(String, keys(get(proj, "extensions", Dict())))
-    # A workload is the path of a file in the repository, or inline code.
+    # A workload is the path of a file relative to the repository root, or inline code.
     function workload_file(w, name)
         isempty(w) && return ""
-        f = joinpath(head_dir, w)
+        f = joinpath(repo_dir, w)
         isfile(f) && return f
-        occursin(r"^[^\n]*\.jl$", w) && error("workload file `$w` not found in $head_dir")
+        occursin(r"^[^\n]*\.jl$", w) && error("workload file `$w` not found in $repo_dir")
         mkpath(work)
         f = joinpath(work, "workload-$name.jl")
         write(f, w)
         return f
     end
-    tasks = [Task(pkg, workload_file(env("TTFX_WORKLOAD", ""), pkg), false)]
+    tasks = [PkgTask(pkg, workload_file(env("TTFX_WORKLOAD", ""), pkg), false)]
     # One dependent per line as `Name: workload`, or bare names separated by spaces or commas
     function add_dependent(d, w = "")
         occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", d) || error("not a package name in `dependents`: `$d`")
-        d == pkg || any(t -> t.pkg == d, tasks) || push!(tasks, Task(d, workload_file(w, d), true))
+        d == pkg || any(t -> t.pkg == d, tasks) || push!(tasks, PkgTask(d, workload_file(w, d), true))
     end
     for line in split(env("TTFX_DEPENDENTS", ""), '\n')
         m = match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$", line)
@@ -161,7 +162,7 @@ errmsg(e) = e isa ErrorException ? e.msg : sprint(showerror, e)
 # Install the task's environment for the arm: the package checkout developed into a fresh
 # project, plus the dependent from the registry. Packages and the registry go into the
 # shared depot; the untimed first precompile fills the arm's own depot.
-function setup!(cfg::Config, a::Arm, t::Task)
+function setup!(cfg::Config, a::Arm, t::PkgTask)
     p = project(a, t)
     mkpath(p); mkpath(depot(a))
     code = """
@@ -187,7 +188,7 @@ end
 # `time` on Windows is too coarse for a fast `using`. With TTFX_GC=off
 # the GC stays off throughout, apart from one full collection after load, which is left
 # out of both phases.
-function task_script(t::Task)
+function task_script(t::PkgTask)
     workload = isempty(t.workload) ? "" : "include($(repr(t.workload)))"
     return """
         const __ttfx_gc_off = get(ENV, "TTFX_GC", "") == "off"
@@ -241,7 +242,7 @@ function clear!(cfg::Config, a::Arm; compiled::Bool)
     end
 end
 
-function run_task(cfg::Config, a::Arm, t::Task, logname; gc_off = false)
+function run_task(cfg::Config, a::Arm, t::PkgTask, logname; gc_off = false)
     cmd = addenv(`$(cfg.julia) --project=$(project(a, t)) $(script(a, t))`,
                  "JULIA_DEPOT_PATH" => depot_path(cfg, a), "TTFX_GC" => gc_off ? "off" : "on")
     out, err, ok, timed_out = run_timed(cmd, cfg.timeout)
@@ -258,7 +259,7 @@ end
 
 # One sample: precompile from a cold cache, then the task `repeats` times in fresh
 # processes, the first of them cold, then once more with the GC off.
-function measure(cfg::Config, a::Arm, t::Task, block::Int)
+function measure(cfg::Config, a::Arm, t::PkgTask, block::Int)
     logname = "$(a.label)-$(t.pkg)-block$block"
     try
         clear!(cfg, a; compiled = true)
@@ -276,12 +277,18 @@ function measure(cfg::Config, a::Arm, t::Task, block::Int)
             l, rr = run_task(cfg, a, t, "$logname-run$r")
             push!(loads, l); push!(runs, rr)
         end
-        clear!(cfg, a; compiled = false)
-        load_gcoff, run_gcoff = run_task(cfg, a, t, "$logname-gcoff"; gc_off = true)
-        return Dict{String,Any}("status" => "ok", "precompile" => precompile,
+        s = Dict{String,Any}("status" => "ok", "precompile" => precompile,
             "load" => loads[1], "run" => runs[1], "warm" => minimum((loads .+ runs)[2:end]),
-            "load_gcoff" => load_gcoff, "run_gcoff" => run_gcoff,
             "loads" => loads, "runs" => runs)
+        # Without the GC a workload can run out of memory. That loses only the GC-off
+        # verdicts, not the sample.
+        clear!(cfg, a; compiled = false)
+        try
+            s["load_gcoff"], s["run_gcoff"] = run_task(cfg, a, t, "$logname-gcoff"; gc_off = true)
+        catch e
+            s["error_gcoff"] = errmsg(e)
+        end
+        return s
     catch e
         @warn "$(t.pkg) failed on the $(a.label) arm in block $block" msg = errmsg(e)
         return Dict{String,Any}("status" => "error", "error" => errmsg(e))
@@ -306,7 +313,7 @@ either(v, vg) = "regression" in (v, vg) ? "regression" : "improvement" in (v, vg
 
 # Per metric of a task: the per-block values and verdicts. Load and run are also judged
 # with the GC off, and either verdict counts, a regression first.
-function compare_task(cfg::Config, t::Task, samples)
+function compare_task(cfg::Config, t::PkgTask, samples)
     results = []
     for m in metrics_of(cfg, t)
         bv = [s["base"][m.key] for s in samples]
@@ -314,7 +321,7 @@ function compare_task(cfg::Config, t::Task, samples)
         v = judge(bv, hv, m)
         r = Dict{String,Any}("metric" => m, "base" => bv, "head" => hv, "ratios" => hv ./ bv,
                              "verdict" => v, "verdict_plain" => v)
-        if m.key in ("load", "run")
+        if m.key in ("load", "run") && all(s -> haskey(s["base"], "load_gcoff") && haskey(s["head"], "load_gcoff"), samples)
             bg = [s["base"][m.key*"_gcoff"] for s in samples]
             hg = [s["head"][m.key*"_gcoff"] for s in samples]
             vg = judge(bg, hg, m)
@@ -332,13 +339,16 @@ end
 function compare_suite(cfg::Config, measured)
     suite = []
     for m in cfg.metrics
-        rs = [r for (_, results) in measured for r in results if r["metric"].key == m.key]
+        # A value below the floor is mostly noise in relative terms, so it stays out.
+        rs = [r for (_, results) in measured for r in results
+              if r["metric"].key == m.key && median(r["base"]) >= m.floor]
         length(rs) >= 2 || continue
         verdict_of(gs) = all(>(1 + m.suite), gs) ? "regression" : all(<(1 - m.suite), gs) ? "improvement" : "same"
         gs = [geomean([r["ratios"][k] for r in rs]) for k in 1:cfg.blocks]
         s = Dict{String,Any}("metric" => m, "ratios" => gs, "verdict_plain" => verdict_of(gs), "n" => length(rs))
-        if m.key in ("load", "run")
-            gg = [geomean([r["ratios_gcoff"][k] for r in rs]) for k in 1:cfg.blocks]
+        rg = filter(r -> haskey(r, "ratios_gcoff"), rs)
+        if m.key in ("load", "run") && length(rg) >= 2
+            gg = [geomean([r["ratios_gcoff"][k] for r in rg]) for k in 1:cfg.blocks]
             s["ratios_gcoff"] = gg
             s["verdict_gcoff"] = verdict_of(gg)
             s["verdict"] = either(s["verdict_plain"], s["verdict_gcoff"])
@@ -378,7 +388,8 @@ function rule_text(cfg::Config, ntasks)
         "with the GC off, and either counts."
     if ntasks >= 2
         ss = join(("$(m.name) $(round(Int, 100m.suite))%" for m in cfg.metrics), ", ")
-        s *= " Over all packages, each metric's geometric mean must clear a threshold in every block ($ss)."
+        s *= " Over all packages whose base value is at least the floor, each metric's geometric mean must clear " *
+             "a threshold in every block ($ss)."
     end
     return s
 end
@@ -402,7 +413,7 @@ function cell(results, key)
     return r["verdict"] == "same" ? c : "**$c $(r["verdict"])**"
 end
 
-function report(cfg::Config, measured, suite, failures, notes)
+function report(cfg::Config, measured, suite, failures, notes; gcoff_errors = Dict{String,String}())
     task_results = [r for (_, results) in measured for r in results]
     nreg = count(r -> r["verdict"] == "regression", task_results) + count(s -> s["verdict"] == "regression", suite) +
            count(f -> f.verdict == "regression", failures)
@@ -450,6 +461,13 @@ function report(cfg::Config, measured, suite, failures, notes)
             println(io, "- ", code(f.pkg), ": ", f.text)
         end
     end
+    for (t, _) in measured
+        e = get(gcoff_errors, t.pkg, nothing)
+        e === nothing && continue
+        println(io)
+        println(io, "The runs of ", code(t.pkg), " with the GC off failed, so it is judged with the GC on only.\n",
+                details("error", e))
+    end
     for n in notes
         println(io)
         println(io, n)
@@ -474,7 +492,7 @@ details(label, e) = "<details><summary>$label</summary>\n\n```\n$e\n```\n</detai
 # A task that fails on one arm only is a regression or an improvement for the package
 # itself. For a dependent it can also mean the dependent's compat does not admit the
 # version of the head commit, so it is only noted.
-function failure(t::Task, base_err, head_err; setup = false)
+function failure(t::PkgTask, base_err, head_err; setup = false)
     if base_err !== nothing && head_err !== nothing
         return (pkg = t.pkg, verdict = "same", text = "fails on both commits.\n" * details("head", head_err))
     elseif head_err !== nothing
@@ -506,12 +524,12 @@ function main()
     # way relative to the shared depot.
     arms = [Arm("base", base_dir, joinpath(cfg.work, "arms", "base")),
             Arm("head", head_dir, joinpath(cfg.work, "arms", "head"))]
-    measured = Tuple{Task,Vector{Any}}[]
+    measured = Tuple{PkgTask,Vector{Any}}[]
     failures = []
     notes = String[]
     differ = Set{String}()
     all_samples = Dict{String,Any}()
-    warmed = false
+    gcoff_errors = Dict{String,String}()
     for t in cfg.tasks
         errs = Dict{String,Any}("base" => nothing, "head" => nothing)
         for a in arms
@@ -528,15 +546,12 @@ function main()
         end
         rb, rh = resolved(project(arms[1], t)), resolved(project(arms[2], t))
         union!(differ, k for k in union(keys(rb), keys(rh)) if k != cfg.pkg && get(rb, k, "") != get(rh, k, ""))
-        # The first processes after setup run slower (file caches, the runner settling),
+        # The first processes after a setup run slower (file caches, the runner settling),
         # and the first arm of block 1 would always take that hit; one discarded sample
         # per arm absorbs it.
-        if !warmed
-            for a in arms
-                @info "Warm-up: $(a.label)"
-                measure(cfg, a, t, 0)
-            end
-            warmed = true
+        for a in arms
+            @info "$(t.pkg), warm-up: $(a.label)"
+            measure(cfg, a, t, 0)
         end
         samples = []
         for b in 1:cfg.blocks
@@ -544,6 +559,11 @@ function main()
             for a in (isodd(b) ? arms : reverse(arms))
                 @info "$(t.pkg), block $b of $(cfg.blocks): $(a.label)"
                 s[a.label] = measure(cfg, a, t, b)
+                r = s[a.label]
+                if r["status"] == "ok"
+                    @info "$(t.pkg), block $b, $(a.label)" precompile = r["precompile"] loads = r["loads"] runs = r["runs"] load_gcoff = get(r, "load_gcoff", nothing) run_gcoff = get(r, "run_gcoff", nothing)
+                    haskey(r, "error_gcoff") && (gcoff_errors[t.pkg] = r["error_gcoff"])
+                end
             end
             push!(samples, s)
             any(s[l]["status"] == "error" for l in ("base", "head")) && break
@@ -562,7 +582,7 @@ function main()
         push!(notes, "The commits resolved different versions of " * join(code.(first(d, 10)), ", ") *
                      (length(d) > 10 ? " and others" : "") * ".")
     end
-    text, verdict, nreg, nimp = report(cfg, measured, compare_suite(cfg, measured), failures, notes)
+    text, verdict, nreg, nimp = report(cfg, measured, compare_suite(cfg, measured), failures, notes; gcoff_errors)
     open(io -> TOML.print(io, Dict("samples" => all_samples)), joinpath(cfg.out, "samples.toml"), "w")
     write(joinpath(cfg.out, "report.md"), text)
     write(joinpath(cfg.out, "verdict"), verdict)

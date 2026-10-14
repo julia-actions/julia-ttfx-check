@@ -20,10 +20,18 @@ marker=$(head -n 1 "$report")
 [[ "$marker" =~ ^\<\!--\ julia-ttfx-check:[A-Za-z0-9._-]+\ --\>$ ]] || { echo "::error::The report does not start with a check marker"; exit 1; }
 
 # The report of a pull request from a fork is untrusted when this runs from workflow_run:
-# only comment on the pull request whose head is the commit that was measured.
+# only comment on the pull request whose head is the commit that was measured. A newer
+# push makes this run's report stale; the run for the new head comments instead.
+if [[ "${TTFX_REQUIRE_HEAD_SHA:-}" == 1 && -z "${TTFX_HEAD_SHA:-}" ]]; then
+    echo "::error::The comment action needs the measured commit (\`head_sha\`)"
+    exit 1
+fi
 if [[ -n "${TTFX_HEAD_SHA:-}" ]]; then
-    pr_head=$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)
-    [[ "$pr_head" == "$TTFX_HEAD_SHA" ]] || { echo "::error::#$pr is at $pr_head, not the measured $TTFX_HEAD_SHA"; exit 1; }
+    pr_head=$(gh api "repos/$repo/pulls/$pr" --jq .head.sha) || { echo "::error::Could not read #$pr"; exit 1; }
+    if [[ "$pr_head" != "$TTFX_HEAD_SHA" ]]; then
+        echo "::notice::#$pr is now at $pr_head, not the measured $TTFX_HEAD_SHA; not commenting"
+        exit 0
+    fi
 fi
 
 case "$mode" in
@@ -41,15 +49,16 @@ existing=$(gh api --paginate "repos/$repo/issues/$pr/comments" \
     exit 0
 }
 
-body=$(jq -Rs '{body: .}' < "$report")
+# GitHub refuses comments over 65536 characters.
+body=$(jq -Rs '{body: (if length > 60000 then .[0:60000] + "\n\n(Truncated; the job summary has the whole report.)" else . end)}' < "$report")
 if [[ -n "$existing" ]]; then
-    gh api -X PATCH "repos/$repo/issues/comments/$existing" --input - <<< "$body" > /dev/null && {
+    err=$(gh api -X PATCH "repos/$repo/issues/comments/$existing" --input - <<< "$body" 2>&1 > /dev/null) && {
         echo "Updated comment $existing"; exit 0; }
 elif [[ "$want" == 1 ]]; then
-    gh api -X POST "repos/$repo/issues/$pr/comments" --input - <<< "$body" > /dev/null && {
+    err=$(gh api -X POST "repos/$repo/issues/$pr/comments" --input - <<< "$body" 2>&1 > /dev/null) && {
         echo "Commented on #$pr"; exit 0; }
 else
     echo "Verdict \`$verdict\` does not call for a comment in mode \`$mode\`"
     exit 0
 fi
-echo "::warning::Could not comment on #$pr (the token may lack permission, as on pull requests from forks). Post the comment from a workflow_run workflow with the comment action."
+echo "::warning::Could not comment on #$pr: ${err//$'\n'/ }. On pull requests from forks the token cannot comment; post the comment from a workflow_run workflow with the comment action."

@@ -26,9 +26,9 @@ second=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" -c user.name=t -c user.email=t@t commit -q --allow-empty -m three
 third=$(git -C "$origin" rev-parse HEAD)
 
-run_checkouts() {  # in a fresh shallow clone, with the given environment
+run_checkouts() {  # in a fresh shallow clone of $repo (default: origin), with the given environment
     rm -rf "$tmp/clone" "$tmp/runner"
-    git clone -q --depth=1 "file://$origin" "$tmp/clone"
+    git clone -q --depth=1 ${branch:+--branch "$branch"} "file://${repo:-$origin}" "$tmp/clone"
     mkdir -p "$tmp/runner"
     export GITHUB_OUTPUT="$tmp/outputs" RUNNER_TEMP="$tmp/runner"
     : > "$GITHUB_OUTPUT"
@@ -60,6 +60,30 @@ run_checkouts INPUT_BASE= PR_BASE= PR_NUMBER= PUSH_BEFORE= INPUT_PATH=sub/Pkg
 check "path input" test "$(output head_dir)" == "$tmp/runner/julia-ttfx-check/src/head/sub/Pkg"
 b=$(output base_dir); h=$(output head_dir)
 check "paths of equal length" test "${#b}" == "${#h}"
+check "the repository root" test "$(output repo_dir)" == "$tmp/runner/julia-ttfx-check/src/head"
+
+# A pull request's merge commit: the base is its first parent, even when the event's base
+# commit is older.
+git -C "$origin" switch -q -c feature "$first"
+git -C "$origin" -c user.name=t -c user.email=t@t commit -q --allow-empty -m feature
+git -C "$origin" switch -q -c merge "$third"
+git -C "$origin" -c user.name=t -c user.email=t@t merge -q --no-ff -m merge feature
+git -C "$origin" switch -q main
+branch=merge run_checkouts INPUT_BASE= PR_BASE="$second" PR_NUMBER=5 PUSH_BEFORE=
+check "merge commit: its first parent, not the older event base" test "$(at "$(output base_dir)")" == "$third"
+
+# A full clone that lacks the base commit stays a full clone after fetching it.
+rm -rf "$tmp/full" "$tmp/runner"; mkdir -p "$tmp/runner"; : > "$GITHUB_OUTPUT"
+git clone -q --single-branch --branch main "file://$origin" "$tmp/full"
+feature=$(git -C "$origin" rev-parse feature)
+(cd "$tmp/full" && env INPUT_BASE="$feature" bash "$src/checkouts.sh" 2>/dev/null)
+check "a full clone fetches the base" test "$(at "$(output base_dir)")" == "$feature"
+check "a full clone stays full" test "$(git -C "$tmp/full" rev-parse --is-shallow-repository)" == false
+
+: > "$GITHUB_OUTPUT"
+(cd "$tmp/full" && env INPUT_BASE="--upload-pack=touch $tmp/pwned" bash "$src/checkouts.sh" > /dev/null 2>&1)
+check "a base that is not a commit name is refused" test -z "$(output base_dir)"
+check "and runs nothing" test ! -e "$tmp/pwned"
 
 # --- comment.sh ---------------------------------------------------------------
 
@@ -72,8 +96,11 @@ cat > "$bin/gh" <<'EOF'
 echo "$*" >> "$FAKE_LOG"
 case "$*" in
     *"/comments --jq"*) [[ -n "${FAKE_EXISTING:-}" ]] && echo "$FAKE_EXISTING"; exit 0 ;;
-    *"/pulls/"*"--jq .head.sha"*) echo "$FAKE_HEAD"; exit 0 ;;
-    *"-X PATCH"*|*"-X POST"*) cat >> "$FAKE_LOG"; echo >> "$FAKE_LOG"; exit "${FAKE_WRITE_STATUS:-0}" ;;
+    *"/pulls/"*"--jq .head.sha"*) [[ -n "${FAKE_PULLS_FAIL:-}" ]] && exit 1; echo "$FAKE_HEAD"; exit 0 ;;
+    *"-X PATCH"*|*"-X POST"*)
+        cat >> "$FAKE_LOG"; echo >> "$FAKE_LOG"
+        [[ "${FAKE_WRITE_STATUS:-0}" != 0 ]] && echo "HTTP 403: Resource not accessible by integration" >&2
+        exit "${FAKE_WRITE_STATUS:-0}" ;;
 esac
 exit 1
 EOF
@@ -108,12 +135,23 @@ run_comment changes regression > /dev/null
 check "the body is the report" grep -q '"body": *"<!-- julia-ttfx-check:default -->' "$tmp/gh.log"
 check "the head matches: comment" test "$(run_comment changes regression TTFX_HEAD_SHA=abc FAKE_HEAD=abc)" == "POST 7"
 check "the head does not match: nothing" test -z "$(run_comment changes regression TTFX_HEAD_SHA=abc FAKE_HEAD=def)"
-check "the head does not match: an error" test "$(cat "$tmp/comment.status")" != 0
+check "the head does not match: a notice, not a failure" test "$(cat "$tmp/comment.status")" == 0
+check "the head does not match: the notice" grep -q '::notice::' "$tmp/comment.out"
+check "the comment action without a head: nothing" test -z "$(run_comment changes regression TTFX_REQUIRE_HEAD_SHA=1)"
+check "the comment action without a head: an error" test "$(cat "$tmp/comment.status")" != 0
+check "the pull request cannot be read: nothing" test -z "$(run_comment changes regression TTFX_HEAD_SHA=abc FAKE_PULLS_FAIL=1)"
+check "the pull request cannot be read: an error" test "$(cat "$tmp/comment.status")" != 0
 run_comment changes regression FAKE_WRITE_STATUS=1 > /dev/null
 check "a refused write warns and does not fail" grep -q '::warning::' "$tmp/comment.out"
+check "the warning says why" grep -q 'HTTP 403' "$tmp/comment.out"
 check "a refused write does not fail" test "$(cat "$tmp/comment.status")" == 0
 run_comment sometimes regression > /dev/null
 check "an unknown mode fails" test "$(cat "$tmp/comment.status")" != 0
+
+{ echo '<!-- julia-ttfx-check:default -->'; head -c 100000 /dev/zero | tr '\0' x; } > "$report_dir/report.md"
+run_comment always regression > /dev/null
+check "a long report is truncated" grep -q 'Truncated; the job summary has the whole report' "$tmp/gh.log"
+check "below the limit" test "$(grep -- '"body"' "$tmp/gh.log" | wc -c)" -lt 65536
 
 printf 'no marker\n' > "$report_dir/report.md"
 check "a report without a marker: nothing" test -z "$(run_comment always regression)"

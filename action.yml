@@ -8,10 +8,10 @@ branding:
 
 inputs:
   name:
-    description: 'A name for this check, to tell apart several checks in one repository. It keys the pull request comment.'
+    description: 'A name for this check, to tell apart several checks in one repository. It keys the pull request comment and the artifact, so it must be unique per job, including across a matrix.'
     default: 'default'
   workload:
-    description: 'Code to run after `using Package`, or the path of a file with it (relative to the repository root). Empty to time loading only.'
+    description: 'Code to run after `using Package`, or the path of a `.jl` file with it, relative to the repository root. Empty to time loading only.'
     default: ''
   dependents:
     description: >-
@@ -34,7 +34,7 @@ inputs:
     description: 'Runs of the workload per sample, each in a fresh process. The first is the cold run; the best of the rest is the warm run.'
     default: '3'
   precompile_scope:
-    description: 'What a sample precompiles from scratch: `package` (the package and its extensions) or `all` (every dependency too).'
+    description: 'What a sample precompiles from scratch: `package` (the package, its extensions whose triggers are installed, and everything depending on it) or `all` (every dependency too).'
     default: 'package'
   threshold_precompile:
     description: 'Change in percent that every block must exceed for precompile time.'
@@ -79,7 +79,7 @@ inputs:
       run once it exists, so it never goes stale.
     default: 'changes'
   fail_on_regression:
-    description: 'Fail the step when there is a robust regression.'
+    description: 'Fail the step when there is a robust regression, or when nothing could be measured.'
     default: 'true'
   timeout:
     description: 'Seconds allowed for each Julia process.'
@@ -144,6 +144,7 @@ runs:
         TTFX_TIMEOUT: ${{ inputs.timeout }}
         TTFX_BASE_DIR: ${{ steps.checkouts.outputs.base_dir }}
         TTFX_HEAD_DIR: ${{ steps.checkouts.outputs.head_dir }}
+        TTFX_REPO_DIR: ${{ steps.checkouts.outputs.repo_dir }}
         TTFX_BASE_LABEL: ${{ steps.checkouts.outputs.base_label }}
         TTFX_HEAD_LABEL: ${{ steps.checkouts.outputs.head_label }}
         TTFX_WORK: ${{ steps.checkouts.outputs.work }}
@@ -170,8 +171,14 @@ runs:
         if-no-files-found: ignore
 
     - name: Fail on a regression
-      if: ${{ inputs.fail_on_regression == 'true' && (steps.measure.outputs.verdict == 'regression' || steps.measure.outputs.verdict == 'mixed') }}
+      if: ${{ inputs.fail_on_regression == 'true' && (steps.measure.outputs.verdict == 'regression' || steps.measure.outputs.verdict == 'mixed' || steps.measure.outputs.verdict == 'error') }}
       shell: bash
+      env:
+        VERDICT: ${{ steps.measure.outputs.verdict }}
       run: |
-        echo "::error::Robust TTFX regression, see the job summary"
+        if [[ "$VERDICT" == error ]]; then
+          echo "::error::Nothing could be measured, see the job summary"
+        else
+          echo "::error::Robust TTFX regression, see the job summary"
+        fi
         exit 1

@@ -77,7 +77,6 @@ jobs:
           name: ci-improvement
           base: ${{ steps.fixture.outputs.slow1 }}
           workload: 'TTFXFixture.f(1)'
-          blocks: '2'
           comment: never
           upload_artifact: 'false'
 
@@ -90,7 +89,6 @@ jobs:
           name: ci-${{ matrix.os }}
           base: ${{ steps.fixture.outputs.fast }}
           workload: 'TTFXFixture.f(1)'
-          blocks: '2'
           # the fixture's report is not about the pull request that triggered CI
           comment: never
 
@@ -101,7 +99,6 @@ jobs:
           name: ci-same
           base: ${{ steps.fixture.outputs.slow2 }}
           workload: 'TTFXFixture.f(1)'
-          blocks: '2'
           comment: never
           upload_artifact: 'false'
 
@@ -142,7 +139,6 @@ jobs:
           workload: 'd = OrderedDict(1 => 2); d[3] = 4; collect(keys(d))'
           dependents: |
             DataStructures: using DataStructures; s = Stack{Int}(); push!(s, 1); pop!(s)
-          blocks: '2'
           comment: never
           fail_on_regression: 'false'
       - name: Check the report

@@ -32,4 +32,5 @@ runs:
         TTFX_REPORT_DIR: ${{ inputs.report_dir }}
         TTFX_REPOSITORY: ${{ github.repository }}
         TTFX_HEAD_SHA: ${{ inputs.head_sha }}
+        TTFX_REQUIRE_HEAD_SHA: '1'
       run: bash "$GITHUB_ACTION_PATH/../src/comment.sh"
