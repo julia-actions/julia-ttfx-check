@@ -1,0 +1,177 @@
+name: 'Julia TTFX check'
+description: "Compare a Julia package's precompile, load and first-run times between a pull request and its base, and report robust changes"
+author: 'Ian Butterworth'
+
+branding:
+  icon: 'clock'
+  color: 'purple'
+
+inputs:
+  name:
+    description: 'A name for this check, to tell apart several checks in one repository. It keys the pull request comment.'
+    default: 'default'
+  workload:
+    description: 'Code to run after `using Package`, or the path of a file with it (relative to the repository root). Empty to time loading only.'
+    default: ''
+  dependents:
+    description: >-
+      Registered packages that depend on this one. Each is installed against both commits and
+      its precompile and load times are compared too, since a regression often shows up
+      downstream. Separate bare names by spaces, commas or newlines; give a dependent its own
+      workload with a line `Name: workload`, where the workload is a file path or code as for
+      `workload`.
+    default: ''
+  path:
+    description: 'Directory of the package in the repository.'
+    default: '.'
+  base:
+    description: 'Commit to compare against. Defaults to the base commit of the pull request, or the previous commit of a push.'
+    default: ''
+  blocks:
+    description: 'Number of ABBA blocks. Each gives one sample of each commit, and a change must be seen in every block.'
+    default: '4'
+  repeats:
+    description: 'Runs of the workload per sample, each in a fresh process. The first is the cold run; the best of the rest is the warm run.'
+    default: '3'
+  precompile_scope:
+    description: 'What a sample precompiles from scratch: `package` (the package and its extensions) or `all` (every dependency too).'
+    default: 'package'
+  threshold_precompile:
+    description: 'Change in percent that every block must exceed for precompile time.'
+    default: '8'
+  threshold_load:
+    description: 'Change in percent that every block must exceed for load time (cold).'
+    default: '10'
+  threshold_run:
+    description: 'Change in percent that every block must exceed for the first run of the workload (cold).'
+    default: '15'
+  threshold_warm:
+    description: 'Change in percent that every block must exceed for load plus run in a warm process.'
+    default: '15'
+  suite_threshold_precompile:
+    description: 'With dependents: change in percent that the geometric mean over all packages must exceed in every block, for precompile time.'
+    default: '2'
+  suite_threshold_load:
+    description: 'With dependents: the same for load time (cold).'
+    default: '2'
+  suite_threshold_run:
+    description: 'With dependents: the same for run time (cold); only the package itself has a workload.'
+    default: '3'
+  suite_threshold_warm:
+    description: 'With dependents: the same for warm time.'
+    default: '3'
+  floor_precompile:
+    description: 'Smallest change in seconds of the median precompile time that counts.'
+    default: '0.25'
+  floor_load:
+    description: 'Smallest change in seconds of the median load time that counts.'
+    default: '0.10'
+  floor_run:
+    description: 'Smallest change in seconds of the median run time that counts.'
+    default: '0.05'
+  floor_warm:
+    description: 'Smallest change in seconds of the median warm time that counts.'
+    default: '0.05'
+  comment:
+    description: >-
+      When to comment on the pull request: `always`, `changes` (a regression or an improvement),
+      `regressions`, `improvements` or `never`. There is one comment per check, updated on every
+      run once it exists, so it never goes stale.
+    default: 'changes'
+  fail_on_regression:
+    description: 'Fail the step when there is a robust regression.'
+    default: 'true'
+  timeout:
+    description: 'Seconds allowed for each Julia process.'
+    default: '1800'
+  upload_artifact:
+    description: 'Upload the report and logs as an artifact, which the `comment` action needs for pull requests from forks.'
+    default: 'true'
+  github_token:
+    description: 'Token for the pull request comment.'
+    default: ${{ github.token }}
+
+outputs:
+  verdict:
+    description: '`regression`, `improvement`, `mixed`, `same` or `error`.'
+    value: ${{ steps.measure.outputs.verdict }}
+  regressions:
+    description: 'Number of robust regressions, counting each package and metric, the geometric means and failures.'
+    value: ${{ steps.measure.outputs.regressions }}
+  improvements:
+    description: 'Number of metrics with a robust improvement.'
+    value: ${{ steps.measure.outputs.improvements }}
+  report:
+    description: 'Path of the markdown report.'
+    value: ${{ steps.measure.outputs.report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check out both commits
+      id: checkouts
+      shell: bash
+      env:
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_PATH: ${{ inputs.path }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PUSH_BEFORE: ${{ github.event.before }}
+      run: bash "$GITHUB_ACTION_PATH/src/checkouts.sh"
+
+    - name: Measure
+      id: measure
+      shell: bash
+      env:
+        TTFX_NAME: ${{ inputs.name }}
+        TTFX_WORKLOAD: ${{ inputs.workload }}
+        TTFX_DEPENDENTS: ${{ inputs.dependents }}
+        TTFX_SUITE_THRESHOLD_PRECOMPILE: ${{ inputs.suite_threshold_precompile }}
+        TTFX_SUITE_THRESHOLD_LOAD: ${{ inputs.suite_threshold_load }}
+        TTFX_SUITE_THRESHOLD_RUN: ${{ inputs.suite_threshold_run }}
+        TTFX_SUITE_THRESHOLD_WARM: ${{ inputs.suite_threshold_warm }}
+        TTFX_BLOCKS: ${{ inputs.blocks }}
+        TTFX_REPEATS: ${{ inputs.repeats }}
+        TTFX_PRECOMPILE_SCOPE: ${{ inputs.precompile_scope }}
+        TTFX_THRESHOLD_PRECOMPILE: ${{ inputs.threshold_precompile }}
+        TTFX_THRESHOLD_LOAD: ${{ inputs.threshold_load }}
+        TTFX_THRESHOLD_RUN: ${{ inputs.threshold_run }}
+        TTFX_THRESHOLD_WARM: ${{ inputs.threshold_warm }}
+        TTFX_FLOOR_PRECOMPILE: ${{ inputs.floor_precompile }}
+        TTFX_FLOOR_LOAD: ${{ inputs.floor_load }}
+        TTFX_FLOOR_RUN: ${{ inputs.floor_run }}
+        TTFX_FLOOR_WARM: ${{ inputs.floor_warm }}
+        TTFX_TIMEOUT: ${{ inputs.timeout }}
+        TTFX_BASE_DIR: ${{ steps.checkouts.outputs.base_dir }}
+        TTFX_HEAD_DIR: ${{ steps.checkouts.outputs.head_dir }}
+        TTFX_BASE_LABEL: ${{ steps.checkouts.outputs.base_label }}
+        TTFX_HEAD_LABEL: ${{ steps.checkouts.outputs.head_label }}
+        TTFX_WORK: ${{ steps.checkouts.outputs.work }}
+        TTFX_OUT: ${{ steps.checkouts.outputs.out }}
+        TTFX_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: julia --startup-file=no "$GITHUB_ACTION_PATH/src/ttfx.jl"
+
+    - name: Comment on the pull request
+      if: ${{ always() && steps.measure.outputs.verdict != '' && inputs.comment != 'never' && github.event.pull_request.number != '' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        TTFX_COMMENT: ${{ inputs.comment }}
+        TTFX_REPORT_DIR: ${{ steps.checkouts.outputs.out }}
+        TTFX_REPOSITORY: ${{ github.repository }}
+      run: bash "$GITHUB_ACTION_PATH/src/comment.sh"
+
+    - name: Upload the report
+      if: ${{ always() && inputs.upload_artifact == 'true' && steps.checkouts.outputs.out != '' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: julia-ttfx-check-${{ inputs.name }}
+        path: ${{ steps.checkouts.outputs.out }}
+        if-no-files-found: ignore
+
+    - name: Fail on a regression
+      if: ${{ inputs.fail_on_regression == 'true' && (steps.measure.outputs.verdict == 'regression' || steps.measure.outputs.verdict == 'mixed') }}
+      shell: bash
+      run: |
+        echo "::error::Robust TTFX regression, see the job summary"
+        exit 1

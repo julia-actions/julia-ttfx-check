@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests, Julia ${{ matrix.julia }}, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        julia: ['1.10', '1']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - run: julia --startup-file=no test/runtests.jl
+      - if: runner.os != 'Windows'
+        run: bash test/scripts.sh
+
+  # The action itself on a package whose `__init__` sleeps in some commits: a fast commit
+  # against a slow one, a slow one against a fast one, and a commit against itself.
+  action:
+    name: Action, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: action
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - name: Make a package repository with a slow, a fast and a slow commit
+        id: fixture
+        shell: bash
+        run: |
+          echo action/ > .gitignore
+          git init -q -b main
+          git config user.name ci; git config user.email ci@example.com
+          mkdir -p src
+          cat > Project.toml <<'EOF'
+          name = "TTFXFixture"
+          uuid = "3c2a7c6e-5a51-4f43-9a8b-2a0c3d1c5e01"
+          version = "0.1.0"
+          EOF
+          commit() {
+            printf 'module TTFXFixture\nf(x) = x + 1\n%s\nend\n' "$1" > src/TTFXFixture.jl
+            git add -A; git commit -q -m "$2"; git rev-parse HEAD
+          }
+          echo "slow1=$(commit '__init__() = sleep(0.5)' slow)" >> "$GITHUB_OUTPUT"
+          echo "fast=$(commit '' fast)" >> "$GITHUB_OUTPUT"
+          echo "slow2=$(commit '__init__() = sleep(0.5)' slow)" >> "$GITHUB_OUTPUT"
+
+      - run: git checkout -q ${{ steps.fixture.outputs.fast }}
+      - name: Improvement
+        id: improvement
+        uses: ./action
+        with:
+          name: ci-improvement
+          base: ${{ steps.fixture.outputs.slow1 }}
+          workload: 'TTFXFixture.f(1)'
+          blocks: '2'
+          comment: never
+          upload_artifact: 'false'
+
+      - run: git checkout -q ${{ steps.fixture.outputs.slow2 }}
+      - name: Regression
+        id: regression
+        continue-on-error: true
+        uses: ./action
+        with:
+          name: ci-${{ matrix.os }}
+          base: ${{ steps.fixture.outputs.fast }}
+          workload: 'TTFXFixture.f(1)'
+          blocks: '2'
+          comment: always
+
+      - name: No change
+        id: same
+        uses: ./action
+        with:
+          name: ci-same
+          base: ${{ steps.fixture.outputs.slow2 }}
+          workload: 'TTFXFixture.f(1)'
+          blocks: '2'
+          comment: never
+          upload_artifact: 'false'
+
+      - name: Check the verdicts
+        shell: bash
+        run: |
+          set -x
+          test "${{ steps.improvement.outputs.verdict }}" == improvement
+          test "${{ steps.regression.outputs.verdict }}" == regression
+          test "${{ steps.regression.outcome }}" == failure  # fail_on_regression defaults to true
+          test "${{ steps.same.outputs.verdict }}" == same
+          head -n 1 "${{ steps.same.outputs.report }}" | grep -qx '<!-- julia-ttfx-check:ci-same -->'
+
+  # A real package with a real dependent, one of them given its own workload.
+  dependents:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: action
+      - uses: actions/checkout@v4
+        with:
+          repository: JuliaCollections/OrderedCollections.jl
+          fetch-depth: 2
+          path: pkg
+      - name: Move the package to the workspace root
+        shell: bash
+        run: shopt -s dotglob && mv pkg/* . && rmdir pkg && echo action/ >> .git/info/exclude
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - name: Check
+        id: check
+        uses: ./action
+        with:
+          # the workspace repository is OrderedCollections, not the pull request's
+          base: HEAD^
+          workload: 'd = OrderedDict(1 => 2); d[3] = 4; collect(keys(d))'
+          dependents: |
+            DataStructures: using DataStructures; s = Stack{Int}(); push!(s, 1); pop!(s)
+          blocks: '2'
+          comment: never
+          fail_on_regression: 'false'
+      - name: Check the report
+        shell: bash
+        run: |
+          set -x
+          test "${{ steps.check.outputs.verdict }}" != error
+          grep -q '`DataStructures`' "${{ steps.check.outputs.report }}"

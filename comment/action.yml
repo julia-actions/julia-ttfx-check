@@ -1,0 +1,35 @@
+name: 'Julia TTFX check: comment'
+description: 'Post the pull request comment of a Julia TTFX check from its uploaded report, for pull requests from forks'
+author: 'Ian Butterworth'
+
+branding:
+  icon: 'message-square'
+  color: 'purple'
+
+inputs:
+  report_dir:
+    description: 'Directory holding the downloaded `julia-ttfx-check-<name>` artifact.'
+    required: true
+  comment:
+    description: 'When to comment: `always`, `changes`, `regressions`, `improvements` or `never`.'
+    default: 'changes'
+  head_sha:
+    description: >-
+      The commit that was measured. The comment goes only to the pull request at this commit,
+      since a fork controls the content of its artifact.
+    default: ${{ github.event.workflow_run.head_sha }}
+  github_token:
+    description: 'Token for the pull request comment.'
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        TTFX_COMMENT: ${{ inputs.comment }}
+        TTFX_REPORT_DIR: ${{ inputs.report_dir }}
+        TTFX_REPOSITORY: ${{ github.repository }}
+        TTFX_HEAD_SHA: ${{ inputs.head_sha }}
+      run: bash "$GITHUB_ACTION_PATH/../src/comment.sh"
