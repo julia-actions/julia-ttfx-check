@@ -183,7 +183,8 @@ function setup!(cfg::Config, a::Arm, t::Task)
     write(script(a, t), task_script(t))
 end
 
-# The script run for each sample. Load is the `using`, run the workload. With TTFX_GC=off
+# The script run for each sample. Load is the `using`, run the workload. `time_ns` because
+# `time` on Windows is too coarse for a fast `using`. With TTFX_GC=off
 # the GC stays off throughout, apart from one full collection after load, which is left
 # out of both phases.
 function task_script(t::Task)
@@ -191,17 +192,17 @@ function task_script(t::Task)
     return """
         const __ttfx_gc_off = get(ENV, "TTFX_GC", "") == "off"
         __ttfx_gc_off && GC.enable(false)
-        __t1 = time()
+        __t1 = time_ns()
         using $(t.pkg)
-        __t2 = time()
+        __t2 = time_ns()
         if __ttfx_gc_off
             GC.enable(true); GC.gc(); GC.enable(false)
         end
-        __t2b = time()
+        __t2b = time_ns()
         $workload
-        __t3 = time()
+        __t3 = time_ns()
         __ttfx_gc_off && GC.enable(true)
-        println(stdout, $(repr(MARKER)), __t2 - __t1, " ", __t3 - __t2b)
+        println(stdout, $(repr(MARKER)), (__t2 - __t1) / 1e9, " ", (__t3 - __t2b) / 1e9)
         """
 end
 

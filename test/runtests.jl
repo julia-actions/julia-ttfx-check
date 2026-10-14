@@ -143,7 +143,8 @@ end
         out = read(addenv(`$(Base.julia_cmd()) --startup-file=no -e $(task_script(t))`, "TTFX_GC" => gc), String)
         line = only(filter(startswith(MARKER), split(out, '\n')))
         load, run = parse.(Float64, split(line[length(MARKER)+1:end]))
-        @test load > 0 && run >= 0
+        # loading a stdlib from the system image can take no measurable time
+        @test load >= 0 && run >= 0
     end
 end
 
