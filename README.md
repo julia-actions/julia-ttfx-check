@@ -8,7 +8,7 @@ For each of the two commits it measures:
 
 | metric | what is timed |
 |---|---|
-| precompile | `Pkg.precompile()` after the package's compiled cache is deleted |
+| precompile | `Base.compilecache` of the package and its installed extensions, with every other cache valid |
 | load (cold) | `using Package` in a fresh process, right after precompiling |
 | run (cold) | the first run of your workload, in the same process |
 | load+run (warm) | load and run again in new processes, the best of the later repeats |
@@ -63,8 +63,8 @@ Requirements and limits:
 - Commenting needs `gh` and `jq`, which GitHub-hosted runners have.
 - A package that is part of Julia's system image cannot be measured: `using` it returns
   the built-in copy.
-- The package's own environment has only the package, so an extension is precompiled and
-  loaded only through a dependent that installs its trigger packages.
+- The package's own environment has only the package, so its extensions are measured only
+  through a dependent that installs their trigger packages.
 
 A robust regression fails the step (`fail_on_regression`), so the pull request shows a red
 check, and so does a run where nothing could be measured (the package fails to load on
@@ -90,7 +90,7 @@ fresh Julia processes. For a package that precompiles in 10 s and loads in 1 s, 
 | `suite_threshold_precompile`, `_load`, `_run`, `_warm` | `2`, `2`, `3`, `3` | With dependents: change in percent that the geometric mean over all packages must exceed in every block. |
 | `blocks` | `4` | ABBA blocks; each gives one sample of each commit. |
 | `repeats` | `3` | Fresh processes per sample for the workload: the first is cold, the best of the rest is warm. |
-| `precompile_scope` | `package` | `package` deletes the package's own compiled cache each sample, so it and everything depending on it precompile again; `all` deletes every compiled cache. |
+| `precompile_scope` | `package` | `package` times compiling just the package (or dependent) and its installed extensions; `all` times `Pkg.precompile()` after deleting every compiled cache, which is much slower. |
 | `base` | the pull request's base | Commit to compare against. On a pull request, the base branch it would merge into; on a push, the branch as it was before the push. |
 | `path` | `.` | Directory of the package in the repository. |
 | `name` | `default` | Tells several checks in one repository apart; each has its own comment and artifact. Must be unique per job, including across a matrix (`name: ${{ matrix.os }}`). |
@@ -140,9 +140,12 @@ and load times the same way. A dependent given its own workload (`Name: path/to/
 `Name: code`, one per line) is timed running it as well; the file is read from the pull
 request's checkout for both commits.
 
-Each sample deletes only your package's compiled cache. That makes every cache depending
-on it stale, so precompiling rebuilds the chain from your package to the dependent, as a
-user's update would.
+Within one commit your package never changes, so its compiled cache, and those of the
+packages between it and the dependent, are built once at setup. Each sample then times
+compiling the dependent itself, with `Base.compilecache`, followed by the extensions
+installed in its environment: its own and your package's. That is how long the dependent
+takes to compile against your package, where invalidations, harder inference and slower
+method insertion show up, without Pkg's overhead and parallelism adding noise.
 
 Each dependent is judged on its own like the package itself. Across all the packages, each
 metric's geometric mean is also judged per block, against the tighter suite threshold: a

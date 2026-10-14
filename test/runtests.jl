@@ -194,9 +194,67 @@ end
         end
         clear!(cfg, a; compiled = false)
         @test !isdir(joinpath(depot(a), "cache")) && isdir(joinpath(compiled, "TTFXFixture"))
+        # by default the precompile script deletes what it times; `all` deletes everything
         clear!(cfg, a; compiled = true)
-        @test !isdir(joinpath(compiled, "TTFXFixture"))
+        @test isdir(joinpath(compiled, "TTFXFixture")) == (scope == "package")
         @test isdir(joinpath(compiled, "Other")) == (scope == "package")
+    end
+end
+
+@testset "precompile targets" begin
+    dir = fixture(mktempdir(), 0)
+    cfg = with_env(() -> config()[1], "TTFX_HEAD_DIR" => dir, "TTFX_WORK" => mktempdir(), "TTFX_DEPENDENTS" => "Dep")
+    u(i) = "00000000-0000-0000-0000-00000000000$i"
+    p = mktempdir()
+    write(joinpath(p, "Manifest.toml"), """
+        manifest_format = "2.0"
+        [[deps.TTFXFixture]]
+        path = "/x"
+        uuid = "$(u(1))"
+        weakdeps = ["Trig", "Absent"]
+        [deps.TTFXFixture.extensions]
+        TrigExt = "Trig"
+        AbsentExt = ["Trig", "Absent"]
+        [[deps.Dep]]
+        uuid = "$(u(2))"
+        version = "1.0.0"
+        weakdeps = ["Trig"]
+        [deps.Dep.extensions]
+        DepTrigExt = ["Trig"]
+        [[deps.Trig]]
+        uuid = "$(u(3))"
+        version = "1.0.0"
+        """)
+    main_task, dep = cfg.tasks
+    ext(parent, name) = (name, string(Base.uuid5(Base.UUID(u(parent)), name)))
+    # the dependent, its extension, then the package's extension whose triggers are all there
+    @test precompile_targets(cfg, p, dep) == [("Dep", u(2)), ext(2, "DepTrigExt"), ext(1, "TrigExt")]
+    @test precompile_targets(cfg, p, main_task) == [("TTFXFixture", u(1)), ext(1, "TrigExt")]
+    code = precompile_code(precompile_targets(cfg, p, main_task))
+    @test occursin("Base.compilecache(id)", code) && occursin(u(1), code)
+end
+
+# A real extension: Statistics with SparseArrays installed. Only where Statistics has the
+# extension (Julia 1.11 and later).
+if VERSION >= v"1.11"
+    @testset "precompile an extension" begin
+        p = mktempdir()
+        depot = mktempdir()
+        env = ("JULIA_DEPOT_PATH" => depot * (Sys.iswindows() ? ";" : ":"), "JULIA_PKG_PRECOMPILE_AUTO" => "0")
+        run(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$p -e "using Pkg; Pkg.add([\"Statistics\", \"SparseArrays\"]); Pkg.precompile()"`, env...))
+        dir = fixture(mktempdir(), 0)
+        cfg = with_env(() -> config()[1], "TTFX_HEAD_DIR" => dir, "TTFX_WORK" => mktempdir(), "TTFX_DEPENDENTS" => "Statistics")
+        targets = precompile_targets(cfg, p, PkgTask("Statistics", "", true))
+        @test first.(targets) == ["Statistics", "SparseArraysExt"]
+        f = joinpath(p, "precompile.jl")
+        write(f, precompile_code(targets))
+        out = read(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$p $f`, env...), String)
+        line = only(filter(startswith(MARKER), split(out, '\n')))
+        total, parts... = split(line[length(MARKER)+1:end])
+        @test parse(Float64, total) > 0
+        @test startswith.(parts, ["Statistics=", "SparseArraysExt="]) == [true, true]
+        # the extension really was compiled again, not found in a cache
+        @test all(x -> parse(Float64, split(x, '=')[2]) > 0.05, parts)
     end
 end
 

@@ -46,6 +46,7 @@ struct PkgTask
 end
 project(a::Arm, t::PkgTask) = joinpath(a.root, "env-" * t.pkg)
 script(a::Arm, t::PkgTask) = joinpath(a.root, "task-" * t.pkg * ".jl")
+precompile_script(a::Arm, t::PkgTask) = joinpath(a.root, "precompile-" * t.pkg * ".jl")
 metrics_of(cfg, t::PkgTask) = filter(m -> m.key != "run" || !isempty(t.workload), cfg.metrics)
 
 struct Config
@@ -55,7 +56,6 @@ struct Config
     shared_depot::String
     name::String           # keys the comment marker
     pkg::String
-    exts::Vector{String}
     tasks::Vector{PkgTask}
     blocks::Int
     repeats::Int
@@ -71,7 +71,6 @@ function config()
     proj = TOML.parsefile(joinpath(head_dir, "Project.toml"))
     haskey(proj, "name") || error("$(joinpath(head_dir, "Project.toml")) has no package name")
     pkg = proj["name"]
-    exts = collect(String, keys(get(proj, "extensions", Dict())))
     # A workload is the path of a file relative to the repository root, or inline code.
     function workload_file(w, name)
         isempty(w) && return ""
@@ -114,7 +113,7 @@ function config()
     repeats >= 2 || error("repeats must be at least 2: the warm metric uses the repeats after the first")
     return Config(`$(Base.julia_cmd()[1]) --startup-file=no`, work,
                   abspath(env("TTFX_OUT", joinpath(work, "report"))), joinpath(work, "depot"),
-                  name, pkg, exts, tasks, blocks, repeats, envfloat("TTFX_TIMEOUT", 1800),
+                  name, pkg, tasks, blocks, repeats, envfloat("TTFX_TIMEOUT", 1800),
                   scope == "all", metrics), head_dir
 end
 
@@ -182,6 +181,57 @@ function setup!(cfg::Config, a::Arm, t::PkgTask)
     log_output(cfg, "precompile-$(a.label)-$(t.pkg)", out, err)
     ok || error("precompiling failed:\n", lastlines(err))
     write(script(a, t), task_script(t))
+    write(precompile_script(a, t), precompile_code(precompile_targets(cfg, p, t)))
+end
+
+function manifest_deps(p::String)
+    for f in ("JuliaManifest.toml", "Manifest.toml")
+        path = joinpath(p, f)
+        isfile(path) || continue
+        m = TOML.parsefile(path)
+        return get(m, "deps", m)
+    end
+    error("no manifest in $p")
+end
+
+# What a sample precompiles, in order: the task's package, then the extensions that are
+# installed in its environment (all their trigger packages are), of the task's package
+# and, for a dependent, of the package under test. As (name, uuid) pairs.
+function precompile_targets(cfg::Config, p::String, t::PkgTask)
+    deps = manifest_deps(p)
+    entry(name) = deps[name][1]
+    targets = [(t.pkg, entry(t.pkg)["uuid"])]
+    for parent in unique([t.pkg, cfg.pkg])
+        haskey(deps, parent) || continue
+        e = entry(parent)
+        for (ext, trig) in sort!(collect(get(e, "extensions", Dict{String,Any}())); by = first)
+            triggers = trig isa String ? [trig] : trig
+            all(x -> haskey(deps, x), triggers) || continue
+            push!(targets, (ext, string(Base.uuid5(Base.UUID(e["uuid"]), ext))))
+        end
+    end
+    return targets
+end
+
+# The script that times precompiling the targets. Every other package keeps the valid
+# cache from setup, so this times exactly the targets, one `Base.compilecache` each, without
+# Pkg's own overhead or its parallelism. Only the targets' own cache files in the arm's depot
+# are deleted first: another package's extension of the same name keeps its cache.
+function precompile_code(targets)
+    ids = join(("Base.PkgId(Base.UUID($(repr(u))), $(repr(n)))" for (n, u) in targets), ", ")
+    return """
+        ids = [$ids]
+        depot = DEPOT_PATH[1]
+        for id in ids, f in Base.find_all_in_cache_path(id)
+            startswith(f, depot) || continue
+            stem = splitext(f)[1]
+            for ext in (".ji", ".so", ".dylib", ".dll")
+                rm(stem * ext; force = true)
+            end
+        end
+        times = [@elapsed(Base.compilecache(id)) for id in ids]
+        println(stdout, $(repr(MARKER)), sum(times), " ", join((id.name * "=" * string(t) for (id, t) in zip(ids, times)), " "))
+        """
 end
 
 # The script run for each sample. Load is the `using`, run the workload. `time_ns` because
@@ -226,20 +276,11 @@ function resolved(p::String)
     return Dict{String,String}()
 end
 
-# Deleting the tested package's compiled cache also makes stale everything that depends on
-# it, so precompiling a dependent's environment rebuilds the chain to the dependent, as it
-# would for a user after an update.
+# The JIT object cache always goes. With `precompile_scope: all`, all compiled code too;
+# otherwise the precompile script deletes just what it times.
 function clear!(cfg::Config, a::Arm; compiled::Bool)
-    rm(joinpath(depot(a), "cache"); recursive = true, force = true)  # the JIT object cache
-    compiled || return
-    if cfg.precompile_all
-        rm(joinpath(depot(a), "compiled"); recursive = true, force = true)
-    else
-        d = joinpath(depot(a), "compiled", "v$(VERSION.major).$(VERSION.minor)")
-        for name in [cfg.pkg; cfg.exts]
-            rm(joinpath(d, name); recursive = true, force = true)
-        end
-    end
+    rm(joinpath(depot(a), "cache"); recursive = true, force = true)
+    compiled && cfg.precompile_all && rm(joinpath(depot(a), "compiled"); recursive = true, force = true)
 end
 
 function run_task(cfg::Config, a::Arm, t::PkgTask, logname; gc_off = false)
@@ -263,14 +304,19 @@ function measure(cfg::Config, a::Arm, t::PkgTask, block::Int)
     logname = "$(a.label)-$(t.pkg)-block$block"
     try
         clear!(cfg, a; compiled = true)
-        code = "using Pkg; t = @elapsed Pkg.precompile(); print(stdout, $(repr(MARKER)), t)"
-        cmd = addenv(`$(cfg.julia) --project=$(project(a, t)) -e $code`, "JULIA_DEPOT_PATH" => depot_path(cfg, a))
-        out, err, ok, timed_out = run_timed(cmd, cfg.timeout)
+        cmd = if cfg.precompile_all
+            code = "using Pkg; t = @elapsed Pkg.precompile(); print(stdout, $(repr(MARKER)), t)"
+            `$(cfg.julia) --project=$(project(a, t)) -e $code`
+        else
+            `$(cfg.julia) --project=$(project(a, t)) $(precompile_script(a, t))`
+        end
+        out, err, ok, timed_out = run_timed(addenv(cmd, "JULIA_DEPOT_PATH" => depot_path(cfg, a)), cfg.timeout)
         if !ok
             log_output(cfg, logname * "-precompile", out, err)
             error("precompile ", timed_out ? "timed out" : "failed:\n" * lastlines(err))
         end
-        precompile = parse(Float64, split(out, MARKER)[end])
+        line = split(split(out, MARKER)[end], '\n')[1]
+        precompile = parse(Float64, split(line)[1])
         clear!(cfg, a; compiled = false)
         loads, runs = Float64[], Float64[]
         for r in 1:cfg.repeats

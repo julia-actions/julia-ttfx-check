@@ -34,7 +34,7 @@ inputs:
     description: 'Runs of the workload per sample, each in a fresh process. The first is the cold run; the best of the rest is the warm run.'
     default: '3'
   precompile_scope:
-    description: 'What a sample precompiles from scratch: `package` (the package, its extensions whose triggers are installed, and everything depending on it) or `all` (every dependency too).'
+    description: 'What a sample times compiling: `package` (the package, or the dependent, and the extensions installed with it, each with `Base.compilecache`) or `all` (`Pkg.precompile()` of the whole environment from scratch, much slower).'
     default: 'package'
   threshold_precompile:
     description: 'Change in percent that every block must exceed for precompile time.'
