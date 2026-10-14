@@ -25,7 +25,7 @@ jobs:
         julia: ['1.10', '1']
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.julia }}
       - run: julia --startup-file=no test/runtests.jl
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: action
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
       - name: Make a package repository with a slow, a fast and a slow commit
@@ -132,7 +132,7 @@ jobs:
       - name: Move the package to the workspace root
         shell: bash
         run: shopt -s dotglob && mv pkg/* . && rmdir pkg && echo action/ >> .git/info/exclude
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
       - name: Check
