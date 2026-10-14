@@ -148,11 +148,23 @@ end
     @test occursin("**Dependents**", text)
     @test occursin("geometric mean", text)
 
-    # a dependent that cannot be installed with the head commit is noted, not counted
+    # a report with a change shows its tables
+    @test !occursin("<summary>Measurements</summary>", text)
+    # a neutral report keeps the measurements in a collapsed section
+    same = [Dict("base" => sample(10.0, 1.0, 0.0), "head" => sample(10.0, 1.0, 0.0)) for _ in 1:2]
+    text, verdict, _, _ = report(cfg, [(main_task, compare_task(cfg, main_task, same))], [], [], String[])
+    @test verdict == "same"
+    @test occursin("No robust change.", text)
+    m = match(r"<details><summary>Measurements</summary>(.*)</details>"s, text)
+    @test m !== nothing && occursin("| metric |", m.captures[1]) && occursin("<sub>", m.captures[1])
+    @test !occursin("| metric |", text[1:first(findfirst("<details>", text))])
+
+    # a dependent that cannot be installed with the head commit is noted, not counted, and
+    # the note stays visible outside the collapsed measurements
     f = failure(dep, nothing, "unsatisfiable requirements"; setup = true)
     text, verdict, nreg, _ = report(cfg, measured[1:1], [], [f], String[])
     @test verdict == "same" && nreg == 0
-    @test occursin("cannot be installed", text)
+    @test occursin("cannot be installed", text[1:first(findfirst("<summary>Measurements", text))])
     # a dependent that installs but then fails with the head commit is a regression
     f = failure(dep, nothing, "ERROR: boom")
     _, verdict, nreg, _ = report(cfg, measured[1:1], [], [f], String[])

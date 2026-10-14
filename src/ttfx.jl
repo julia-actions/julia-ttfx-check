@@ -470,66 +470,83 @@ function report(cfg::Config, measured, suite, failures, notes; gcoff_errors = Di
     summary = verdict == "error" ? "Nothing could be measured." : nreg + nimp == 0 ? "No robust change." :
         join(filter(!isempty, [nreg > 0 ? plural(nreg, "robust regression") : "",
                                nimp > 0 ? plural(nimp, "robust improvement") : ""]), ", ") * "."
-    io = IOBuffer()
-    println(io, marker(cfg))
-    println(io, "### ", title(cfg), ": ", summary)
-    println(io)
-    println(io, header(cfg))
+    # The tables and the rule
+    tables = IOBuffer()
     main = findfirst(((t, _),) -> !t.dependent, measured)
     if main !== nothing
-        println(io)
-        metric_table(io, measured[main][2])
+        println(tables)
+        metric_table(tables, measured[main][2])
     end
     deps = [(t, r) for (t, r) in measured if t.dependent]
     if !isempty(deps)
-        println(io)
-        println(io, "**Dependents** (median change over blocks)")
-        println(io)
-        println(io, "| package | precompile | load (cold) | run (cold) | load+run (warm) |")
-        println(io, "|---|---|---|---|---|")
+        println(tables)
+        println(tables, "**Dependents** (median change over blocks)")
+        println(tables)
+        println(tables, "| package | precompile | load (cold) | run (cold) | load+run (warm) |")
+        println(tables, "|---|---|---|---|---|")
         for (t, r) in deps
-            println(io, "| ", code(t.pkg), " | ", cell(r, "precompile"), " | ", cell(r, "load"), " | ",
+            println(tables, "| ", code(t.pkg), " | ", cell(r, "precompile"), " | ", cell(r, "load"), " | ",
                     cell(r, "run"), " | ", cell(r, "warm"), " |")
         end
     end
     if !isempty(suite)
-        println(io)
-        println(io, "| all packages (geomean) | change per block | with GC off |")
-        println(io, "|---|---|---|")
+        println(tables)
+        println(tables, "| all packages (geomean) | change per block | with GC off |")
+        println(tables, "|---|---|---|")
         for s in suite
-            println(io, "| ", label(s["metric"].name, s["verdict"]), " | ", changes(s, "ratios", "verdict_plain"),
+            println(tables, "| ", label(s["metric"].name, s["verdict"]), " | ", changes(s, "ratios", "verdict_plain"),
                     " | ", changes(s, "ratios_gcoff", "verdict_gcoff"), " |")
         end
     end
+    per_block = IOBuffer()
+    if !isempty(deps)
+        println(per_block)
+        println(per_block, "<details><summary>Dependents per block</summary>\n")
+        for (t, r) in deps
+            println(per_block, code(t.pkg), "\n")
+            metric_table(per_block, r)
+            println(per_block)
+        end
+        println(per_block, "</details>")
+    end
+    println(per_block)
+    println(per_block, "<sub>", rule_text(cfg, length(measured)), "</sub>")
+    # What a reader needs even when nothing changed
+    remarks = IOBuffer()
     if !isempty(failures)
-        println(io)
+        println(remarks)
         for f in failures
-            println(io, "- ", code(f.pkg), ": ", f.text)
+            println(remarks, "- ", code(f.pkg), ": ", f.text)
         end
     end
     for (t, _) in measured
         e = get(gcoff_errors, t.pkg, nothing)
         e === nothing && continue
-        println(io)
-        println(io, "The runs of ", code(t.pkg), " with the GC off failed, so it is judged with the GC on only.\n",
+        println(remarks)
+        println(remarks, "The runs of ", code(t.pkg), " with the GC off failed, so it is judged with the GC on only.\n",
                 details("error", e))
     end
     for n in notes
-        println(io)
-        println(io, n)
+        println(remarks)
+        println(remarks, n)
     end
-    if !isempty(deps)
-        println(io)
-        println(io, "<details><summary>Dependents per block</summary>\n")
-        for (t, r) in deps
-            println(io, code(t.pkg), "\n")
-            metric_table(io, r)
-            println(io)
-        end
-        println(io, "</details>")
-    end
+
+    io = IOBuffer()
+    println(io, marker(cfg))
+    println(io, "### ", title(cfg), ": ", summary)
     println(io)
-    println(io, "<sub>", rule_text(cfg, length(measured)), "</sub>")
+    println(io, header(cfg))
+    if verdict == "same"
+        # Nothing to act on: keep the measurements out of the way.
+        print(io, String(take!(remarks)))
+        println(io)
+        println(io, "<details><summary>Measurements</summary>")
+        print(io, String(take!(tables)), String(take!(per_block)))
+        println(io)
+        println(io, "</details>")
+    else
+        print(io, String(take!(tables)), String(take!(remarks)), String(take!(per_block)))
+    end
     return String(take!(io)), verdict, nreg, nimp
 end
 
