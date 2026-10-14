@@ -37,9 +37,6 @@ jobs:
   action:
     name: Action, ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +91,8 @@ jobs:
           base: ${{ steps.fixture.outputs.fast }}
           workload: 'TTFXFixture.f(1)'
           blocks: '2'
-          comment: always
+          # the fixture's report is not about the pull request that triggered CI
+          comment: never
 
       - name: No change
         id: same
