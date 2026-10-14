@@ -418,9 +418,26 @@ function header(cfg::Config)
     head = env("TTFX_HEAD_LABEL", "head")
     base = env("TTFX_BASE_LABEL", "base")
     url = env("TTFX_RUN_URL", "")
-    runner = env("RUNNER_OS", string(Sys.KERNEL)) * " " * env("RUNNER_ARCH", string(Sys.ARCH))
-    s = "$(code(cfg.pkg)) $head vs $base · Julia $VERSION · $runner · $(cfg.blocks) blocks (ABBA)"
+    s = "$(code(cfg.pkg)) $head vs $base"
     return isempty(url) ? s : s * " · [run]($url)"
+end
+
+function setting(cfg::Config)
+    runner = env("RUNNER_OS", string(Sys.KERNEL)) * " " * env("RUNNER_ARCH", string(Sys.ARCH))
+    return "Julia $VERSION · $runner · $(cfg.blocks) blocks (ABBA)"
+end
+
+# The flagged metrics of a package or of the geometric means, with the median change of
+# the measurement that flagged them.
+function flagged(results)
+    parts = String[]
+    for r in results
+        r["verdict"] == "same" && continue
+        gcoff = r["verdict_plain"] == "same"
+        c = change(median(r[gcoff ? "ratios_gcoff" : "ratios"]))
+        push!(parts, r["metric"].name * " " * c * (gcoff ? " (GC off)" : ""))
+    end
+    return join(parts, ", ")
 end
 
 marker(cfg::Config) = "<!-- julia-ttfx-check:$(cfg.name) -->"
@@ -531,22 +548,35 @@ function report(cfg::Config, measured, suite, failures, notes; gcoff_errors = Di
         println(remarks, n)
     end
 
+    # Visible: one line per package with a robust change, or a failure that counts.
+    bullets = String[]
+    for (t, results) in measured
+        f = flagged(results)
+        isempty(f) || push!(bullets, "- $(code(t.pkg)): $f")
+    end
+    for f in failures
+        f.verdict == "same" || push!(bullets, "- $(code(f.pkg)): " * first(split(f.text, '\n')))
+    end
+    f = flagged(suite)
+    isempty(f) || push!(bullets, "- All packages (geometric mean): $f")
+    nnotes = count(f -> f.verdict == "same", failures) + length(gcoff_errors) + length(notes)
+
     io = IOBuffer()
     println(io, marker(cfg))
     println(io, "### ", title(cfg), ": ", summary)
     println(io)
     println(io, header(cfg))
-    if verdict == "same"
-        # Nothing to act on: keep the measurements out of the way.
-        print(io, String(take!(remarks)))
+    if !isempty(bullets)
         println(io)
-        println(io, "<details><summary>Measurements</summary>")
-        print(io, String(take!(tables)), String(take!(per_block)))
-        println(io)
-        println(io, "</details>")
-    else
-        print(io, String(take!(tables)), String(take!(remarks)), String(take!(per_block)))
+        foreach(b -> println(io, b), bullets)
     end
+    println(io)
+    println(io, "<details><summary>Details", nnotes > 0 ? " ($(plural(nnotes, "note")))" : "", "</summary>")
+    println(io)
+    println(io, setting(cfg))
+    print(io, String(take!(tables)), String(take!(remarks)), String(take!(per_block)))
+    println(io)
+    println(io, "</details>")
     return String(take!(io)), verdict, nreg, nimp
 end
 

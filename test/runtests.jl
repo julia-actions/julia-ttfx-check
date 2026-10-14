@@ -148,31 +148,39 @@ end
     @test occursin("**Dependents**", text)
     @test occursin("geometric mean", text)
 
-    # a report with a change shows its tables
-    @test !occursin("<summary>Measurements</summary>", text)
-    # a neutral report keeps the measurements in a collapsed section
+    # visible: a line for the geometric mean that changed, the tables only in the details
+    visible(text) = text[1:first(findfirst("<details><summary>Details", text))]
+    @test occursin("- All packages (geometric mean): precompile +5.0%", visible(text))
+    @test !occursin("| metric |", visible(text))
+    @test occursin("| metric |", text) && occursin("<sub>", text)
+    # a package line names only its flagged metrics, with the measurement that flagged them
+    gc = [Dict("base" => sample(2.0, 0.30, 0.20), "head" => sample(2.0, 0.31, 0.20; gcoff = 2.0)) for _ in 1:2]
+    text, _, _, _ = report(cfg, [(main_task, compare_task(cfg, main_task, gc))], [], [], String[])
+    @test occursin("- `TTFXFixture`: load (cold) +106.7% (GC off)\n", visible(text))
+    # a neutral report: just the heading and the details
     same = [Dict("base" => sample(10.0, 1.0, 0.0), "head" => sample(10.0, 1.0, 0.0)) for _ in 1:2]
     text, verdict, _, _ = report(cfg, [(main_task, compare_task(cfg, main_task, same))], [], [], String[])
     @test verdict == "same"
     @test occursin("No robust change.", text)
-    m = match(r"<details><summary>Measurements</summary>(.*)</details>"s, text)
-    @test m !== nothing && occursin("| metric |", m.captures[1]) && occursin("<sub>", m.captures[1])
-    @test !occursin("| metric |", text[1:first(findfirst("<details>", text))])
+    @test !occursin("\n- ", visible(text))
+    @test occursin("<details><summary>Details</summary>", text)
 
-    # a dependent that cannot be installed with the head commit is noted, not counted, and
-    # the note stays visible outside the collapsed measurements
+    # a dependent that cannot be installed with the head commit is noted, not counted; the
+    # details say there is a note
     f = failure(dep, nothing, "unsatisfiable requirements"; setup = true)
     text, verdict, nreg, _ = report(cfg, measured[1:1], [], [f], String[])
     @test verdict == "same" && nreg == 0
-    @test occursin("cannot be installed", text[1:first(findfirst("<summary>Measurements", text))])
+    @test occursin("<summary>Details (1 note)</summary>", text)
+    @test occursin("cannot be installed", text)
     # a dependent that installs but then fails with the head commit is a regression
     f = failure(dep, nothing, "ERROR: boom")
     _, verdict, nreg, _ = report(cfg, measured[1:1], [], [f], String[])
     @test verdict == "regression" && nreg == 1
-    # the package itself failing on head is a regression
+    # the package itself failing on head is a regression, on a visible line
     f = failure(main_task, nothing, "ERROR: boom")
-    _, verdict, nreg, _ = report(cfg, [], [], [f], String[])
+    text, verdict, nreg, _ = report(cfg, [], [], [f], String[])
     @test verdict == "regression" && nreg == 1
+    @test occursin("- `TTFXFixture`: fails with the head commit.", visible(text))
     # nothing measured at all
     _, verdict, _, _ = report(cfg, [], [], [failure(main_task, "x", "y")], String[])
     @test verdict == "error"

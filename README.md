@@ -107,8 +107,9 @@ job summary.
 Each check keeps a single comment on the pull request. The `comment` input decides when that
 comment is first created; `changes` also counts a run where nothing could be measured. Once it exists, it is updated on every run, whatever the verdict,
 so it always describes the latest commit. A pull request that showed a regression and then
-fixed it ends with a comment saying there is no robust change. A report with no robust change
-keeps its measurements in a collapsed section, so it takes little space.
+fixed it ends with a comment saying there is no robust change. A report shows only its verdict and
+one line per package with a robust change, naming the metrics that changed and by how
+much; the measurements, notes and settings are in a collapsed section.
 
 ## How a change is judged
 
